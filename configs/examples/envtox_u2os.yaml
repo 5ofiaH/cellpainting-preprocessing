@@ -1,0 +1,259 @@
+# Project: EnvTox U2OS
+# Configuration for the EnvTox project (envtox1085), U2OS cell line.
+#
+# Style:    follows config_base.yaml 
+# Customization: EnvTox U2OS metadata columns, thresholds, and ID columns.
+#
+# All options from config.py are listed here (set to project values, or
+# commented showing the default) so nothing is silently defaulted.
+
+project_name: "envtox1085"
+
+database:
+  uri: ""   # leave empty: read from the IMAGEDB_URI environment variable (see README)
+  feature_analysis_type: "cp-features"
+  qc_analysis_type: "cp-qc"
+  use_db: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data loading — cache the expensive per-plate compartment merge so re-runs are fast
+# ─────────────────────────────────────────────────────────────────────────────
+data_loading:
+  skip_loading: false
+  # load_compartments: ["nuclei", "cells", "cytoplasm"]  # default
+  # merge_compartments: true                              # default
+  use_cache: true            # load cached site-level parquet instead of re-merging from DB
+  cache_subdir: "_feature_cache"
+  refresh_cache: false       # set true to force a rebuild from the database
+  # compartment_files:                                     # default names
+  #   nuclei: "featICF_nuclei.parquet"
+  #   cells: "featICF_cells.parquet"
+  #   cytoplasm: "featICF_cytoplasm.parquet"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Image-level QC (blur/focus outliers + low cell-count sites)
+# Queries the cp-qc analysis, computes robust-Z flags per site, and provides the
+# real per-site nuclei count (Count_nuclei).
+# ─────────────────────────────────────────────────────────────────────────────
+image_qc:
+  run: true
+  apply_filter: true         # drop flagged sites before aggregation
+  qc_metrics:                # matches EnvTox 01_data_prep.py qc_metrics
+    - "FocusScore"
+    - "MaxIntensity"
+    - "MeanIntensity"
+    - "PowerLogLogSlope"
+    - "StdIntensity"
+  z_threshold: 5.0
+  min_nuclei_per_site: 30
+  count_col: "Count_nuclei"
+
+  dmso_site_qc: true
+  dmso_min_cells_per_site: 30
+  dmso_count_z_threshold: 3.5
+  drop_dmso_outliers: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Metadata File & Column Mapping
+# ─────────────────────────────────────────────────────────────────────────────
+metadata:
+  file_path: "/path/to/EnvTox-U2OS/U2OS/data/metadata/meta_u2os_tox1085_annotated_with_ids.csv"  # [EDIT]
+  sep: ","
+
+  barcode_col: "Metadata_Barcode"
+  well_col: "Metadata_Well"
+  cell_line_col: "Metadata_CellLine"
+  compound_col: "Metadata_Compound_Name"
+  conc_col: "Metadata_conc_uM"
+  pert_type_col: "Metadata_pert_type"
+  project_col: "Metadata_Project"
+  site_col: "Metadata_Site"
+
+  # ID columns to extract from metadata (present in meta_..._with_ids.csv).
+  # Preserved through all pipeline levels; supersede the deprecated overrides below.
+  qc_id_col: "Metadata_pipeline_id_qc"
+  feat_id_col: "Metadata_pipeline_id_feat_texture"
+  plate_acq_id_col: "Metadata_plate_acquisition_id"
+
+  cell_line_rename: {}
+
+  cell_lines:
+    - "U2OS"
+
+  # Deprecated in favor of the ID columns above (kept empty for base-style parity).
+  plate_name_overrides: {}
+  plate_acq_id_overrides: {}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Aggregation (Sites → Wells, Level 3)
+# ─────────────────────────────────────────────────────────────────────────────
+aggregation:
+  operation: "median"  # "median" or "mean"
+  min_cells_per_site: 30
+  min_dmso_cells_per_site: 30
+  min_cells_per_well: 50
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Normalization (Level 4a)
+# ─────────────────────────────────────────────────────────────────────────────
+normalization:
+  # Method: "mad_robustize" | "standardize" | "robustize" | "spherize"
+  method: "mad_robustize"
+  samples_query: "Metadata_pert_type == 'negcon'"
+  invariant_filter_reference_query: "Metadata_pert_type == 'negcon'"
+  mad_threshold: 0.001
+  clip_min: -10.0
+  clip_max: 10.0
+
+  # Blocklist features to drop
+  # NOTE: Uses pycytominer's standard blocklist (get_blocklist_features)
+  # This is automatically loaded and applied. Config option kept for future extensibility.
+  # See: https://github.com/cytomining/pycytominer
+  blocklist_patterns: []  # Leave empty to use pycytominer defaults
+  # (added: code default — this field exists in config.py but was missing here)
+  dmso_center_tolerance: 0.5  # flag plates whose mean DMSO feature value after normalization exceeds ±this
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature Selection (Level 4b)
+# ─────────────────────────────────────────────────────────────────────────────
+feature_selection:
+  # pycytominer feature_select operations (same order as the reference pipeline).
+  # "blocklist" uses pycytominer's canonical CellProfiler blocklist.
+  operations:
+    - "variance_threshold"
+    - "drop_na_columns"
+    - "correlation_threshold"
+    - "blocklist"
+    - "drop_outliers"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Batch Correction (Level 4c) — ComBat
+# ─────────────────────────────────────────────────────────────────────────────
+batch_correction:
+  run: true  # Set to false to skip batch correction
+  # Method: "combat" (default) | "harmony" | "spherize"
+  #   combat   — scanpy ComBat, per-plate location/scale correction (uses batch_effect_fix below)
+  #   harmony  — harmonypy integration with the plate as the batch variable
+  #   spherize — pycytominer ZCA whitening fit on the DMSO (negcon) reference
+  method: "combat"
+  plate_col: "Metadata_Barcode"  # batch variable (always the plate)
+
+  # How ComBat models within-plate position:
+  #   "barcode"            — plate only, no covariates
+  #   "barcode_row"        — also preserve well row (A–P)  <-- EnvTox regressed the well row
+  #   "barcode_column"     — also preserve well column (1–24)
+  #   "barcode_row_column" — preserve both row and column
+  batch_effect_fix: "barcode_row"
+
+  min_dmso_per_plate: 3
+
+  # Remove the within-plate column positional gradient (estimated from DMSO).
+  regress_out_column: true
+  column_min_dmso: 4
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Consensus (Level 5)
+# ─────────────────────────────────────────────────────────────────────────────
+consensus:
+  operation: "median"  # "median" | "mean" | "modz" — one consensus profile per compound x dose
+  aggregation_method: "median"
+  # Replicate group = one treatment (compound x concentration).
+  # Columns are harmonized to canonical names at load (Compound_Name -> compound).
+  replicate_cols:
+    - "Metadata_compound"
+    - "Metadata_conc_uM"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Metrics Computation
+# ─────────────────────────────────────────────────────────────────────────────
+metrics:
+  compute_map: true  # mAP via copairs
+  map_null_size: 500
+  map_fdr_threshold: 0.05
+
+  compute_consistency: false  # no MOA/target column in this metadata
+  consistency_col: "Metadata_moa"
+  consistency_null_size: 500
+  consistency_fdr_threshold: 0.05
+
+  compute_grit: true  # GRIT via cytominer_eval
+  compute_reproducibility: true  # Replicate reproducibility
+
+  grit_flag_threshold: 1.0  # NOTE: field is grit_flag_threshold, not grit_threshold
+  viability_threshold_pct: 0.50  # % of DMSO median (well flagged cytotoxic below this)
+
+  # Site-level viability: per-site count vs a cleaned per-plate DMSO reference,
+  # rolled up to wells by median-of-ratios.
+  viability_site_count_col: "Metadata_Count_nuclei"
+  viability_dmso_z_threshold: 3.0  # drop DMSO sites with robust Z < -3.0 from the reference (low side)
+  viability_min_sites: 2           # wells with <2 retained sites → low-confidence flag
+
+  pca_variance_explained: 0.95
+
+  negcon_value: "negcon"
+  poscon_value: "poscon"
+  pert_type_col: "Metadata_pert_type"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Standalone profile_metrics.py, wired into the run (opt-in). Runs on Level 4b
+# (well-level, feature-selected, PRE batch correction). Independent of
+# metrics.py's mAP/GRIT; writes its own CSV/PNG outputs to
+# <cell_line>/features/profile_metrics/ and never aborts the run on failure.
+# ─────────────────────────────────────────────────────────────────────────────
+profile_metrics:
+  run: true  # set true to enable
+  compute_activity: true    # profile_activity_table.csv (Euclidean distance vs DMSO centroid)
+  active_percentile: 95.0
+  compute_matching: true    # profile_biosimilarity_matrix.csv (Pearson-based, per compound)
+  query_compound: null
+  similarity_threshold: 90.0
+  plot_profile: true
+  top_n_var: 40
+  dmso_compound: "DMSO"
+
+
+# mahalanobis — section added for schema parity (code defaults; behaviour unchanged)
+mahalanobis:
+  run: false  # opt-in OASIS-style per-plate Mahalanobis distance to DMSO (mahalanobis_distance.py)
+  level: "4b"  # "4b" (pre batch correction) or "4c"
+  cover_var: 0.95  # PCA explained variance to retain
+  min_dmso_wells: 4  # min DMSO wells per plate to compute MD
+  keep_poscon: false  # keep poscon rows in the output
+  compartments: ["Nuclei", "Cells", "Cytoplasm"]
+  seed: 42
+
+
+# site_level — section added for schema parity (code defaults; behaviour unchanged)
+site_level:
+  run: false  # opt-in Level 2.5a/2.5b (site-level normalization + feature selection)
+
+
+# manual_site_drop — section added for schema parity (code defaults; behaviour unchanged)
+manual_site_drop:
+  enabled: false  # manually drop sites flagged by eye (see config.py ManualSiteDropConfig)
+  sites: []  # e.g. - {barcode: "PB000123", well: "C04", site: "3"}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Output Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+output:
+  base_dir: "/path/to/EnvTox-U2OS"  # [EDIT] project output root
+  skip_existing: true
+  features_subdir: "features"
+  qc_subdir: "qc"
+  plots_subdir: "plots"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-cell-line feature/concentration column mapping
+# (if different cell lines have different metadata schemas)
+# ─────────────────────────────────────────────────────────────────────────────
+compound_col_map: {}
+conc_col_map: {}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run Control
+# ─────────────────────────────────────────────────────────────────────────────
+run_batch_correction: true
+run_from_level4_only: false
+run_metrics_for_level5_only: true

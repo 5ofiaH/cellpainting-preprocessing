@@ -1,0 +1,362 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# Cell Painting pipeline — base configuration template
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Every option the pipeline understands (config.py) is listed here with its
+# default value. Copy this file per project and change what you need; anything
+# you delete falls back to the default shown here. Unknown/misspelled keys are
+# SILENTLY IGNORED, so copy key names exactly.
+#
+# ── QUICK START ──────────────────────────────────────────────────────────────
+#  1. Copy:  cp configs/config_base.yaml configs/my_project.yaml
+#  2. Edit the settings marked  [EDIT]  — at minimum:
+#       project_name, output.base_dir, metadata.cell_lines, and the
+#       metadata.*_col column names so they match YOUR metadata file.
+#     (metadata.file_path and database are only needed for step 0 below.)
+#  3. Run (from the repository root)
+#
+#     Step 0 — build Level 2.5 (site-level features + metadata + image QC)
+#     from the image database, then run everything else:
+#         python run_full_pipeline.py --config configs/my_project.yaml
+#
+#     Level 2.5 already exists → run Level 3 … plots:
+#         python run_pipeline.py --config configs/my_project.yaml [--cell-line U2OS]
+#
+#     Only part of the pipeline (see run_steps below, or --help):
+#         python run_pipeline.py --config ... --from-step level4a --input edited_level_3.parquet
+#         python run_pipeline.py --config ... --only metrics
+#         python run_pipeline.py --config ... --only plots --plots qc
+#
+#     Plots only, from an existing run:
+#         python run_analysis_plots.py --output-dir <base_dir> --config ... [--plots qc,metrics]
+#
+# ── WHAT THE LEVELS ARE ──────────────────────────────────────────────────────
+#   Level 2.5  one row per imaging SITE (features + metadata, after image QC)
+#   Level 3    one row per WELL (sites aggregated)
+#   Level 4a   normalized per plate against DMSO
+#   Level 4b   feature-selected            ← mAP / GRIT are computed here
+#   Level 4c   batch-corrected
+#   Level 5    one row per compound × dose (consensus); two variants:
+#              level_5_batch_corrected (from 4c), level_5_no_batch_correction (from 4b)
+#
+# ── WHERE OUTPUTS GO ─────────────────────────────────────────────────────────
+#   <base_dir>/
+#     _image_qc/                 image-QC flags + drop accounting (step 0)
+#     _feature_cache/            cached compartment merge (step 0)
+#     <cell_line>/
+#       <features_subdir>/       e.g. features_2026-10-05/
+#         level_2_5.csv          (or a link to it, when read from another run)
+#         level_3 … level_5_*.parquet, metrics_map/grit.parquet,
+#         viability_sites.parquet, profile_metrics/, mahalanobis_distances.csv,
+#         RUN_SUMMARY.md         ← start here: what every step did, counts, drops
+#         run_summary.json, pipeline_summary.json
+#       <plots_subdir>/          e.g. plots_2026-10-05/
+#         01_qc/ 02_batch/ 03_controls/ 04_overview/ 05_metrics/ 06_site_level/
+#
+# Settings marked "(not used)" are kept only so older configs still load;
+# changing them has no effect.
+# ═════════════════════════════════════════════════════════════════════════════
+
+project_name: "my_project"  # [EDIT] free text, shown in RUN_SUMMARY.md
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Output folders  [EDIT]
+# {date} → today's date (YYYY-MM-DD) and {time} → HHMM, filled in when the run
+# starts, so every run day gets its own folder and earlier runs are never
+# overwritten. Reruns on the SAME day reuse (overwrite) that day's folder —
+# add {time} (e.g. "features_{date}_{time}") for one folder per run, or use
+# a fixed name ("features", "features_after_drop") to always write the same
+# place.
+# A new dated folder has no Level 2.5 yet: point run_steps.input_dir at the
+# folder that holds level_2_5.csv (see below), or run run_full_pipeline.py.
+# To re-plot or resume an OLD dated run, set its exact folder name here.
+# ─────────────────────────────────────────────────────────────────────────────
+output:
+  base_dir: "."                     # [EDIT] project output root (absolute path recommended;
+                                    #   relative = relative to where you run the command;
+                                    #   "" = the current working directory)
+  features_subdir: "features_{date}"  # level files, metrics, run summaries
+  plots_subdir: "plots_{date}"        # plots
+  qc_subdir: "qc"                     # (not used)
+  skip_existing: true                 # (not used)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Which steps to run (run_pipeline.py)
+# Steps, in order — a run executes from_step … to_step:
+#   level3   Level 2.5 → 3    viability, (opt.) site level, site → well aggregation
+#   level4a  Level 3 → 4a     per-plate normalization
+#   level4b  Level 4a → 4b    feature selection + viability attach
+#   level4c  Level 4b → 4c    batch correction (+ row/column fixes)
+#   level5   Level 4b/4c → 5  consensus (both variants)
+#   metrics  Level 4b         mAP / GRIT / consistency (+ profile_metrics,
+#                             mahalanobis if enabled), attached to Level 5
+#   plots                     plots from the files in the features folder
+# Inputs a run does not produce itself are read from input_files, else from
+# <input_dir>/<level>.parquet (or .csv). Everything is written to the output
+# folder above; inputs read from elsewhere are copied there under their
+# standard name (an existing file is kept as <level>.replaced_<time>.parquet).
+# Command-line flags --from-step, --to-step, --only, --level2-5, --input, --input-dir and
+# --plots override these values.
+# ─────────────────────────────────────────────────────────────────────────────
+run_steps:
+  from_step: "level3"  # first step to run
+  to_step: "plots"     # last step to run
+  input_dir: null      # folder with an earlier run's files ({cell_line} is replaced);
+                       #   null = the output features folder. Also where a new
+                       #   dated run looks for level_2_5.csv.
+  level2_5_file: null  # Level 2.5 file (csv/parquet) to start level3 from;
+                       #   null = <features>/level_2_5.csv. {cell_line} allowed.
+  input_files: {}      # explicit inputs, {level: path}; {cell_line} allowed in paths
+  plot_groups: null    # plots step only: qc, batch, controls, overview, metrics,
+                       #   site_level; null = all
+  # Examples:
+  #   start from a specific Level 2.5 file:
+  #     level2_5_file: "/path/to/{cell_line}_level_2_5_filtered.parquet"
+  #   new dated run from an existing Level 2.5:
+  #     input_dir: "/path/to/project/{cell_line}/features"
+  #   edited Level 3 → rerun from normalization:
+  #     from_step: "level4a"
+  #     input_files: {level_3: "/path/to/{cell_line}_level_3_edited.parquet"}
+  #   only mAP / GRIT on an earlier run's Level 4b:
+  #     from_step: "metrics"
+  #     to_step: "metrics"
+  #     input_dir: "/path/to/project/{cell_line}/features_2026-09-23"
+  #   only the QC plots:
+  #     from_step: "plots"
+  #     plot_groups: ["qc"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Metadata — column names in YOUR data  [EDIT]
+# The pipeline renames compound_col / conc_col to Metadata_compound /
+# Metadata_conc_uM internally, so output files always use those two names.
+# ─────────────────────────────────────────────────────────────────────────────
+metadata:
+  file_path: "./data/metadata.csv"  # plate-map / compound metadata (step 0 only)
+  sep: ","                          # its column separator
+
+  barcode_col: "Metadata_Barcode"       # plate barcode (also the batch variable)
+  well_col: "Metadata_Well"             # well id, e.g. "C04"
+  site_col: "Metadata_Site"             # imaging site number within the well
+  cell_line_col: "Metadata_CellLine"    # cell line name (step 0 splits by this)
+  compound_col: "Metadata_Compound_Name"  # compound name / id
+  conc_col: "Metadata_conc_uM"          # concentration
+  pert_type_col: "Metadata_pert_type"   # "negcon" (DMSO) / "poscon" / "trt"
+  project_col: "Metadata_Project"       # (not used)
+
+  # Cell lines to process; null = all (step 0: every cell line in the metadata;
+  # run_pipeline.py: every sub-folder of base_dir except _*)
+  cell_lines: null
+  # Example:
+  #   cell_lines: ["U2OS", "HOG"]
+
+  # Optional ID columns, carried through all levels if present
+  qc_id_col: null         # e.g. "Metadata_pipeline_id_qc"
+  feat_id_col: null       # e.g. "Metadata_pipeline_id_feat_texture"
+  plate_acq_id_col: null  # e.g. "Metadata_plate_acquisition_id"
+
+  cell_line_rename: {}        # (not used)
+  plate_name_overrides: {}    # (not used)
+  plate_acq_id_overrides: {}  # (not used)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STEP 0 — building Level 2.5 (run_full_pipeline.py only)
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Image database
+database:
+  uri: ""   # leave empty: read from the IMAGEDB_URI environment variable (see README)
+  feature_analysis_type: "cp-features"  # analysis that holds the CellProfiler features
+  qc_analysis_type: "cp-qc"             # analysis that holds the image-QC measurements
+  use_db: false                         # (not used — step 0 always reads the DB/cache)
+
+# Compartment merge + cache
+data_loading:
+  merge_compartments: true   # merge nuclei / cells / cytoplasm into one site table
+  compartment_files:
+    nuclei: "featICF_nuclei.parquet"
+    cells: "featICF_cells.parquet"
+    cytoplasm: "featICF_cytoplasm.parquet"
+  use_cache: true            # reuse <base_dir>/<cache_subdir>/ instead of re-merging (minutes → seconds)
+  cache_subdir: "_feature_cache"
+  refresh_cache: false       # true = rebuild the cache from the database
+  skip_loading: false        # (not used — use run_pipeline.py to skip step 0)
+  load_compartments: ["nuclei", "cells", "cytoplasm"]  # (not used — see compartment_files)
+
+# Image-level QC: flags out-of-focus / saturated / low-count sites
+image_qc:
+  run: true                 # compute image-QC flags from qc_analysis_type
+  apply_filter: true        # drop flagged sites (false = only flag them)
+  qc_metrics:               # ImageQuality measurements checked (robust Z per plate)
+    - "FocusScore"
+    - "PowerLogLogSlope"
+    - "MaxIntensity"
+    - "MeanIntensity"
+  z_threshold: 5.0          # a site is an outlier if |robust Z| > this
+  min_nuclei_per_site: 20   # sites with fewer nuclei are flagged
+  count_col: "Count_nuclei" # per-site nuclei count column in the QC data
+
+  # DMSO sites define the normalization reference, so they get a stricter check.
+  dmso_site_qc: true             # run the DMSO site check
+  dmso_min_cells_per_site: 30    # DMSO sites below this count are flagged
+  dmso_count_z_threshold: 3.5    # … or with count robust Z below -this
+  drop_dmso_outliers: true       # drop flagged DMSO sites (false = only flag)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LEVEL 3 – 5 processing (run_pipeline.py, steps level3 … level5)
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Manual site drop — sites you spotted by eye (e.g. in QC images) that the
+# automatic image QC missed. Applied right after Level 2.5 is read, so you do
+# not need to rebuild Level 2.5 to drop a site.
+# ─────────────────────────────────────────────────────────────────────────────
+manual_site_drop:
+  enabled: false
+  # Each entry drops the rows matching ALL the keys it gives (barcode, well,
+  # site, cell_line); leave a key out to match any value. "site" can be a list.
+  sites: []
+  # Example:
+  #   sites:
+  #     - {barcode: "PB000123", well: "C04", site: "3"}                     # one site, all cell lines
+  #     - {barcode: "PB000123", well: "C04", site: "7", cell_line: "U2OS"}  # one site, U2OS only
+  #     - {site: [3, 6], cell_line: "U2OS"}  # sites 3 and 6 of every U2OS well
+
+# Level 3 — sites → wells
+aggregation:
+  operation: "median"           # "median" or "mean" over the sites of a well
+  min_cells_per_site: 20        # treatment sites with fewer cells are dropped first
+  min_dmso_cells_per_site: 20   # same for DMSO sites
+  min_cells_per_well: 50        # reference line in the cell-count plots only (no filtering)
+
+# Level 4a — per-plate normalization against DMSO
+normalization:
+  method: "mad_robustize"       # "mad_robustize" | "standardize" | "robustize" | "spherize"
+  samples_query: "Metadata_pert_type == 'negcon'"                     # reference wells per plate
+  invariant_filter_reference_query: "Metadata_pert_type == 'negcon'"  # wells used to find invariant features
+  mad_threshold: 0.001          # features with MAD ≤ this on DMSO are dropped
+  clip_min: -10.0               # normalized values are clipped to [clip_min, clip_max]
+  clip_max: 10.0
+  dmso_center_tolerance: 0.5    # QC: flag plates whose mean DMSO value after normalization exceeds ±this
+  blocklist_patterns: []        # (not used — the blocklist is applied in feature_selection)
+
+# Level 4b — feature selection (pycytominer feature_select, in this order)
+feature_selection:
+  operations:
+    - "variance_threshold"      # near-constant features
+    - "drop_na_columns"         # features with many missing values
+    - "correlation_threshold"   # one of each highly correlated pair
+    - "blocklist"               # pycytominer's CellProfiler blocklist — the ONLY blocklist step, keep it
+    - "drop_outliers"           # features with extreme values
+
+# Level 4c — batch (plate) correction
+batch_correction:
+  run: true                     # false = Level 4c is a copy of 4b
+  method: "spherize"
+  #   spherize — ZCA whitening fit on DMSO; closest to the standard
+  #              profiling recipe (no cross-plate statistical model)
+  #   combat   — per-plate location/scale correction (scanpy ComBat)
+  #   harmony  — harmonypy integration, plate = batch
+  plate_col: "Metadata_Barcode" # batch variable (the plate)
+  min_dmso_per_plate: 3         # warn about plates with fewer DMSO wells (weak reference);
+                                #   also the minimum clean DMSO sites for the viability reference
+
+  # Optional removal of well-position effects, applied after the method above.
+  # Leave "barcode" unless the QC plots (01_qc spatial effects) show a row or
+  # column pattern.
+  #   "barcode"            — no row/column removal (default)
+  #   "barcode_row"        — remove well-row (A–P) effect
+  #   "barcode_column"     — remove well-column (1–24) effect
+  #   "barcode_row_column" — remove both
+  # (Older configs call this covariate_mode; that name still works.)
+  batch_effect_fix: "barcode"
+
+  # Optional within-plate column drift removal, estimated from DMSO wells.
+  regress_out_column: false
+  column_min_dmso: 4            # DMSO wells a column needs to estimate its offset
+
+# Level 2.5a/2.5b — optional site-level normalization + feature selection
+# (one row per SITE instead of per well), plus site_outliers.csv flagging odd
+# sites within each compound × dose, and plots in 06_site_level/. Use with
+# drop_outlier_sites.py to remove outlier sites and rerun.
+site_level:
+  run: false
+
+# Level 5 — one consensus profile per compound × dose
+consensus:
+  operation: "median"           # "median" | "mean" | "modz"
+  # Columns that define one treatment; empty = compound + concentration.
+  replicate_cols: []
+  # Example:
+  #   replicate_cols: ["Metadata_compound", "Metadata_conc_uM"]
+  aggregation_method: "median"  # (not used)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# METRICS (step "metrics", computed on Level 4b, attached to Level 5)
+# ═════════════════════════════════════════════════════════════════════════════
+metrics:
+  # Which wells are controls (values of pert_type_col)
+  pert_type_col: "Metadata_pert_type"
+  negcon_value: "negcon"
+  poscon_value: "poscon"
+
+  # Phenotypic activity: mAP of a compound's replicates vs DMSO (copairs)
+  compute_map: true
+  map_null_size: 500            # permutations for the p-value (higher = slower, more precise)
+  map_fdr_threshold: 0.05       # corrected p below this = "active"
+
+  # Phenotypic consistency: mAP of compounds sharing a MOA / target
+  compute_consistency: true
+  consistency_col: "Metadata_moa"  # grouping column, e.g. "Metadata_moa" / "Metadata_target"
+  consistency_null_size: 500
+  consistency_fdr_threshold: 0.05
+
+  # GRIT: replicate signal relative to DMSO (cytominer_eval)
+  compute_grit: true
+  grit_flag_threshold: 1.0      # threshold drawn / flagged in the GRIT plots
+                                #   (the key is grit_flag_threshold, not grit_threshold)
+  compute_reproducibility: true # (not used)
+
+  # Viability (flag only — nothing is dropped). Per-site cell count relative to
+  # the plate's DMSO sites, rolled up to wells by median-of-ratios.
+  viability_threshold_pct: 0.80     # flag wells below 80 % of DMSO cell count
+  viability_site_count_col: "Metadata_Count_nuclei"  # per-site nuclei count column
+  viability_dmso_z_threshold: 3.0   # low-count DMSO sites (robust Z < -this) are left out of the reference
+  viability_min_sites: 2            # wells with fewer usable sites are marked low-confidence
+
+  pca_variance_explained: 0.95  # (not used)
+
+# Optional: profile_metrics.py — activity (distance to DMSO) + biosimilarity
+# between compounds, on Level 4b. Output: <features folder>/profile_metrics/.
+# Failures are logged in RUN_SUMMARY.md and never stop the run.
+profile_metrics:
+  run: false
+  compute_activity: true        # profile_activity_table.csv
+  active_percentile: 95.0       # "active" = farther from DMSO than this percentile of DMSO wells
+  compute_matching: true        # profile_biosimilarity_matrix.csv (Pearson-based)
+  dmso_compound: "DMSO"         # DMSO compound name (backup for pert_type_col)
+
+  # Optional: look up the compounds most similar to one compound of interest
+  query_compound: null          # e.g. "my_compound"; null = skip
+  similarity_threshold: 90.0    # minimum biosimilarity % to report
+  plot_profile: false           # also plot its z-score profile vs the positive controls
+  top_n_var: 40                 # number of most variable features in that plot
+
+# Optional: Mahalanobis distance of each treatment to its plate's DMSO
+# (OASIS-style). Output: <features folder>/mahalanobis_distances.csv.
+mahalanobis:
+  run: false
+  level: "4b"                   # "4b" (before batch correction) or "4c"
+  cover_var: 0.95               # PCA variance kept
+  min_dmso_wells: 4             # plates with fewer DMSO wells are skipped
+  keep_poscon: false            # also report positive controls
+  compartments: ["Nuclei", "Cells", "Cytoplasm"]
+  seed: 42
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Not used — kept so older configs still load
+# ═════════════════════════════════════════════════════════════════════════════
+compound_col_map: {}
+conc_col_map: {}
+run_batch_correction: true        # use batch_correction.run
+run_from_level4_only: false       # use run_steps.from_step
+run_metrics_for_level5_only: true

@@ -1,0 +1,20 @@
+# Same dependencies as pyproject.toml, for `pip install -r requirements.txt`.
+# Versions known to work together (tested environment):
+numpy==1.26.4
+pandas==2.3.0
+pyarrow==20.0.0
+PyYAML==6.0.1
+scipy==1.15.3
+scikit-learn==1.7.0
+statsmodels==0.14.4
+matplotlib==3.9.0
+seaborn==0.13.2
+pycytominer==1.1.0
+copairs==0.5.1
+cytominer-eval==0.1
+anndata==0.11.4
+scanpy==1.11.2
+harmonypy==0.2.0
+umap-learn==0.5.7
+SQLAlchemy==2.0.35
+psycopg2-binary==2.9.10

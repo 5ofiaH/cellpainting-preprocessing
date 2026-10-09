@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data & pipeline outputs — never commit data
+*.csv
+*.parquet
+*.h5
+*.h5ad
+*.log
+features*/
+plots*/
+qc/
+outputs/
+_image_qc/
+_feature_cache/
+_cache/
+
+# Your own project configs stay local; only the template + examples are tracked.
+# Put project configs in configs/local/ (or anywhere outside the repo).
+configs/local/
+
+# Local secrets
+.env
+
+# Claude Code local settings
+.claude/settings.local.json
